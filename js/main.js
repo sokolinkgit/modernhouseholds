@@ -1,17 +1,22 @@
 /* ============================================================
-   MESO HOUSEHOLDS — One-Stop Household Solution
+   CASA KITCHEN AND HOME — Household Supplies & Home Decor
    Pure JavaScript (no libraries)
+   Catalogue lives locally so a dedicated database can be
+   plugged in later without changing the site architecture.
    ============================================================ */
 
-const SHOP_PHONE_DISPLAY = "0742 005 725";
-const WHATSAPP_NUMBER = "254742005725";
-const PRODUCT_IMAGE_BUCKET = "product-images";
-const supabaseClient = window.supabase?.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY);
+const SHOP_NAME = "Casa Kitchen and Home";
+const SHOP_PHONE_DISPLAY = "0796 014 187";
+const WHATSAPP_NUMBER = "254796014187";
+const CATALOGUE_KEY = "casaCatalogue";
+const CART_KEY = "casaCart";
+const ADMIN_SESSION_KEY = "casaAdminSession";
 let CATEGORIES = [
   { id: "appliances", slug: "appliances", name: "Kitchen Appliances", emoji: "🍳", image_url: "" },
   { id: "flasks", slug: "flasks", name: "Flasks & Thermos", emoji: "🧴", image_url: "" },
   { id: "dining", slug: "dining", name: "Dining", emoji: "🍽️", image_url: "" },
   { id: "cookware", slug: "cookware", name: "Cookware", emoji: "🥘", image_url: "" },
+  { id: "decor", slug: "decor", name: "Home Decor", emoji: "🕯️", image_url: "" },
 ];
 let isAdmin = false;
 
@@ -155,7 +160,7 @@ function renderProducts(filter = "all") {
 
   list.forEach((p, i) => {
     const waText = encodeURIComponent(
-      `Hello Meso Households! \n\n` +
+      `Hello ${SHOP_NAME}! \n\n` +
         `I'd like to order:\n• ${p.name} — ${formatKES(p.price)}\n\n` +
         `Please confirm availability and delivery details.\n\n` +
         `Thank you!`
@@ -233,7 +238,7 @@ filterBar.addEventListener("click", (e) => {
 /* ---------- Cart ---------- */
 let cart = [];
 try {
-  cart = JSON.parse(localStorage.getItem("mesoCart")) || [];
+  cart = JSON.parse(localStorage.getItem(CART_KEY)) || [];
 } catch {
   cart = [];
 }
@@ -250,7 +255,7 @@ const cartTotal = $("#cartTotal");
 const cartClose = $("#cartClose");
 
 function saveCart() {
-  localStorage.setItem("mesoCart", JSON.stringify(cart));
+  localStorage.setItem(CART_KEY, JSON.stringify(cart));
 }
 
 function renderCart() {
@@ -394,7 +399,7 @@ $("#checkoutBtn").addEventListener("click", () => {
   );
   const total = cart.reduce((s, it) => s + it.price * it.qty, 0);
   const msg =
-    `Hello Meso Households! 🏠\n\n` +
+    `Hello ${SHOP_NAME}! 🏠\n\n` +
     `I'd like to place this order:\n${lines.join("\n")}\n\n` +
     `*TOTAL: ${formatKES(total)}*\n\n` +
     `Name: \nDelivery/Pickup: \n\nThank you!`;
@@ -505,15 +510,37 @@ revealEls.forEach((el) => {
   observer.observe(el);
 });
 
-/* ---------- Supabase catalogue + admin ---------- */
+/* ---------- Local catalogue + admin ---------- */
+function newId() {
+  return (crypto.randomUUID && crypto.randomUUID()) || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+function persistCatalogue() {
+  try {
+    localStorage.setItem(CATALOGUE_KEY, JSON.stringify({ categories: CATEGORIES, products: PRODUCTS }));
+  } catch (err) {
+    throw new Error("Could not save the catalogue on this device. Try fewer or smaller photos.");
+  }
+}
+function mapSavedProduct(p) {
+  return {
+    id: p.id,
+    name: p.name,
+    category: p.category,
+    categoryLabel: p.categoryLabel || categoryLabel(p.category),
+    price: Number(p.price) || 0,
+    image: p.image || (p.images && p.images[0]) || "",
+    images: p.images && p.images.length ? p.images : (p.image ? [p.image] : []),
+    tag: p.tag || null,
+    desc: p.desc || "",
+    sort_order: p.sort_order || 0,
+  };
+}
 async function loadCatalogue() {
-  if (!supabaseClient) return;
-  const [{ data: cats, error: catError }, { data: rows, error: productError }] = await Promise.all([
-    supabaseClient.from("categories").select("*").order("sort_order"),
-    supabaseClient.from("products").select("*, categories(slug, name)").order("sort_order"),
-  ]);
-  if (!catError && cats?.length) CATEGORIES = cats;
-  if (!productError && rows?.length) PRODUCTS = rows.map((p) => ({ id: p.id, name: p.name, category: p.categories?.slug, categoryLabel: p.categories?.name, price: Number(p.price), image: p.image_url, images: p.images || [], tag: p.tag, desc: p.description, sort_order: p.sort_order }));
+  try {
+    const saved = JSON.parse(localStorage.getItem(CATALOGUE_KEY) || "null");
+    if (saved?.categories?.length) CATEGORIES = saved.categories;
+    if (saved?.products?.length) PRODUCTS = saved.products.map(mapSavedProduct);
+  } catch { /* keep bundled defaults */ }
   renderFilterBar();
   renderProducts($(".filter-btn.active")?.dataset.filter || "all");
   if ($("#manageDialog").open) renderManageList();
@@ -542,42 +569,25 @@ function applyAdminUI() {
 }
 
 async function refreshAdmin() {
+  persistCatalogue();
   await loadCatalogue();
 }
 
-async function checkAdminSession(sessionArg) {
-  if (!supabaseClient) return;
-  let session = sessionArg;
-  if (session === undefined) {
-    const { data } = await supabaseClient.auth.getSession();
-    session = data.session;
-  }
-  isAdmin = false;
-  if (session) {
-    const { data } = await supabaseClient.from("admin_users").select("user_id").eq("user_id", session.user.id).maybeSingle();
-    isAdmin = !!data;
-  }
+function checkAdminSession() {
+  isAdmin = sessionStorage.getItem(ADMIN_SESSION_KEY) === "1";
   applyAdminUI();
 }
 
-/* ---------- Image uploads (Supabase Storage) — used for both product photos and category images ---------- */
+/* ---------- Image uploads (stored with the local catalogue until a database is connected) ---------- */
 async function uploadImage(file) {
-  const extMatch = /\.([a-z0-9]+)$/i.exec(file.name || "");
-  const ext = (extMatch ? extMatch[1] : "jpg").toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
-  const path = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-  const { error } = await supabaseClient.storage.from(PRODUCT_IMAGE_BUCKET).upload(path, file, { upsert: true, cacheControl: "3600" });
-  if (error) throw error;
-  const { data } = supabaseClient.storage.from(PRODUCT_IMAGE_BUCKET).getPublicUrl(path);
-  return data.publicUrl;
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("Could not read that photo"));
+    reader.readAsDataURL(file);
+  });
 }
-async function deleteUploadedImage(url) {
-  if (!url) return;
-  const marker = `/object/public/${PRODUCT_IMAGE_BUCKET}/`;
-  const idx = url.indexOf(marker);
-  if (idx === -1) return; // not an uploaded image (e.g. a bundled local placeholder) — leave it alone
-  const path = url.slice(idx + marker.length);
-  try { await supabaseClient.storage.from(PRODUCT_IMAGE_BUCKET).remove([path]); } catch { /* best-effort */ }
-}
+async function deleteUploadedImage() { /* local catalogue — nothing to delete remotely */ }
 
 /* ---------- Category dialog ---------- */
 let categoryReturnToProduct = false;
@@ -626,17 +636,44 @@ $("#removeCategoryImageBtn").addEventListener("click", () => {
   setCategoryImagePreview("");
 });
 async function saveCategoryRow(id, baseSlug, rest) {
-  let attempt = 0;
   let slug = baseSlug;
-  while (true) {
-    const body = { ...rest, slug };
-    const result = id
-      ? await supabaseClient.from("categories").update(body).eq("id", id).select().single()
-      : await supabaseClient.from("categories").insert(body).select().single();
-    if (!result.error || result.error.code !== "23505" || attempt >= 4) return result;
+  let attempt = 0;
+  while (CATEGORIES.some((c) => c.slug === slug && String(c.id) !== String(id || ""))) {
     attempt += 1;
     slug = `${baseSlug}-${attempt}`;
+    if (attempt >= 8) break;
   }
+  if (id) {
+    const i = CATEGORIES.findIndex((c) => String(c.id) === String(id));
+    if (i === -1) return { error: { message: "Category not found" } };
+    const previousSlug = CATEGORIES[i].slug;
+    CATEGORIES[i] = { ...CATEGORIES[i], ...rest, slug };
+    if (previousSlug !== slug) {
+      PRODUCTS.forEach((p) => {
+        if (p.category === previousSlug) {
+          p.category = slug;
+          p.categoryLabel = CATEGORIES[i].name;
+        }
+      });
+    } else {
+      PRODUCTS.forEach((p) => {
+        if (p.category === slug) p.categoryLabel = CATEGORIES[i].name;
+      });
+    }
+    persistCatalogue();
+    return { data: CATEGORIES[i], error: null };
+  }
+  const cat = {
+    id: newId(),
+    slug,
+    name: rest.name,
+    emoji: rest.emoji || "",
+    image_url: rest.image_url || "",
+    sort_order: CATEGORIES.length + 1,
+  };
+  CATEGORIES.push(cat);
+  persistCatalogue();
+  return { data: cat, error: null };
 }
 $("#categoryForm").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -653,7 +690,6 @@ $("#categoryForm").addEventListener("submit", async (event) => {
     const name = $("#categoryName").value.trim();
     const result = await saveCategoryRow(id || null, slugify(name), { name, image_url: imageUrl || "" });
     if (result.error) throw result.error;
-    if (pendingCategoryImageFile && oldImage) await deleteUploadedImage(oldImage);
     $("#categoryDialog").close();
     await refreshAdmin();
     if (categoryReturnToProduct && $("#productDialog").open) {
@@ -673,12 +709,21 @@ $("#categoryForm").addEventListener("submit", async (event) => {
     categoryReturnToBulk = false;
   }
 });
+function deleteCategoryById(id) {
+  const cat = CATEGORIES.find((c) => String(c.id) === String(id));
+  if (!cat) return { error: { message: "Category not found" } };
+  if (PRODUCTS.some((p) => p.category === cat.slug)) {
+    return { error: { message: "Move or delete the products in this category first." } };
+  }
+  CATEGORIES = CATEGORIES.filter((c) => String(c.id) !== String(id));
+  persistCatalogue();
+  return { error: null };
+}
 async function deleteCategoryQuick(id) {
   const cat = CATEGORIES.find((c) => String(c.id) === String(id));
   if (!confirm(`Delete category "${cat?.name || ""}"? It must have no products left in it.`)) return;
-  const r = await supabaseClient.from("categories").delete().eq("id", id);
+  const r = deleteCategoryById(id);
   if (r.error) return showToast(r.error.message);
-  if (cat?.image_url) await deleteUploadedImage(cat.image_url);
   await refreshAdmin();
   showToast("Category deleted");
 }
@@ -687,9 +732,8 @@ $("#deleteCategoryBtn").addEventListener("click", async () => {
   if (!id) return;
   const cat = CATEGORIES.find((c) => String(c.id) === String(id));
   if (!confirm(`Delete category "${cat?.name || ""}"? It must have no products left in it.`)) return;
-  const r = await supabaseClient.from("categories").delete().eq("id", id);
+  const r = deleteCategoryById(id);
   if (r.error) return ($("#categoryError").textContent = r.error.message);
-  if (cat?.image_url) await deleteUploadedImage(cat.image_url);
   $("#categoryDialog").close();
   await refreshAdmin();
   showToast("Category deleted");
@@ -706,6 +750,40 @@ function populateProductCategorySelect() {
 }
 function nextSortOrder() {
   return Math.max(0, ...PRODUCTS.map((p) => Number(p.sort_order) || 0)) + 1;
+}
+function productFromPayload(payload, existing) {
+  return {
+    id: existing?.id || newId(),
+    name: payload.name,
+    category: payload.category,
+    categoryLabel: payload.categoryLabel,
+    price: Number(payload.price) || 0,
+    image: payload.image_url || "",
+    images: payload.images || [],
+    tag: payload.tag || null,
+    desc: payload.description || "",
+    sort_order: existing?.sort_order ?? payload.sort_order ?? nextSortOrder(),
+  };
+}
+function saveProductRow(id, payload) {
+  if (id) {
+    const i = PRODUCTS.findIndex((p) => String(p.id) === String(id));
+    if (i === -1) return { error: { message: "Product not found" } };
+    PRODUCTS[i] = productFromPayload(payload, PRODUCTS[i]);
+    persistCatalogue();
+    return { data: PRODUCTS[i], error: null };
+  }
+  const created = productFromPayload(payload, null);
+  PRODUCTS.push(created);
+  persistCatalogue();
+  return { data: created, error: null };
+}
+function deleteProductById(id) {
+  const before = PRODUCTS.length;
+  PRODUCTS = PRODUCTS.filter((p) => String(p.id) !== String(id));
+  if (PRODUCTS.length === before) return { error: { message: "Product not found" } };
+  persistCatalogue();
+  return { error: null };
 }
 function renderProductPhotoGallery() {
   const gallery = $("#productPhotoGallery");
@@ -727,8 +805,7 @@ $("#productPhotoGallery").addEventListener("click", async (e) => {
   const thumb = e.target.closest(".photo-thumb");
   if (removeBtn) {
     const i = Number(removeBtn.dataset.index);
-    const [removed] = productPhotos.splice(i, 1);
-    if (removed && !removed.file) await deleteUploadedImage(removed.url);
+    productPhotos.splice(i, 1);
     renderProductPhotoGallery();
     return;
   }
@@ -807,14 +884,15 @@ $("#productForm").addEventListener("submit", async (event) => {
     for (const p of productPhotos) images.push(p.file ? await uploadImage(p.file) : p.url);
     const payload = {
       name: $("#productName").value.trim(),
-      category_id: category.id,
+      category: category.slug,
+      categoryLabel: category.name,
       price: Number($("#productPrice").value),
       image_url: images[0] || "",
       images,
       tag: $("#productTag").value.trim() || null,
       description: $("#productDescription").value.trim(),
     };
-    const result = id ? await supabaseClient.from("products").update(payload).eq("id", id) : await supabaseClient.from("products").insert(payload);
+    const result = saveProductRow(id || null, payload);
     if (result.error) throw result.error;
     $("#productDialog").close();
     await refreshAdmin();
@@ -826,16 +904,11 @@ $("#productForm").addEventListener("submit", async (event) => {
     saveBtn.textContent = originalLabel;
   }
 });
-async function deleteAllProductImages(product) {
-  const urls = productImages(product);
-  for (const url of urls) await deleteUploadedImage(url);
-}
 async function deleteProductQuick(id) {
   const product = PRODUCTS.find((p) => String(p.id) === String(id));
   if (!confirm(`Delete "${product?.name || "this product"}"? This cannot be undone.`)) return;
-  const r = await supabaseClient.from("products").delete().eq("id", id);
+  const r = deleteProductById(id);
   if (r.error) return showToast(r.error.message);
-  if (product) await deleteAllProductImages(product);
   await refreshAdmin();
   showToast("Product deleted");
 }
@@ -844,9 +917,8 @@ $("#deleteProductBtn").addEventListener("click", async () => {
   if (!id) return;
   const product = PRODUCTS.find((p) => String(p.id) === String(id));
   if (!confirm(`Delete "${product?.name || "this product"}"? This cannot be undone.`)) return;
-  const r = await supabaseClient.from("products").delete().eq("id", id);
+  const r = deleteProductById(id);
   if (r.error) return ($("#productError").textContent = r.error.message);
-  if (product) await deleteAllProductImages(product);
   $("#productDialog").close();
   await refreshAdmin();
   showToast("Product deleted");
@@ -854,8 +926,11 @@ $("#deleteProductBtn").addEventListener("click", async () => {
 async function moveProductToCategory(productId, newSlug) {
   const category = CATEGORIES.find((c) => c.slug === newSlug);
   if (!category) return;
-  const r = await supabaseClient.from("products").update({ category_id: category.id }).eq("id", productId);
-  if (r.error) return showToast(r.error.message);
+  const product = PRODUCTS.find((p) => String(p.id) === String(productId));
+  if (!product) return;
+  product.category = category.slug;
+  product.categoryLabel = category.name;
+  persistCatalogue();
   await refreshAdmin();
   showToast("Product moved");
 }
@@ -987,30 +1062,33 @@ $("#bulkUploadForm").addEventListener("submit", async (event) => {
     const combinePhotos = $("#bulkCombinePhotos").checked;
     const uploadedCount = urls.length;
     const base = nextSortOrder();
-    const { error } = combinePhotos
-      ? await supabaseClient.from("products").insert({
-          name: nameFromFileName(bulkFiles[0].file),
-          category_id: category.id,
+    if (combinePhotos) {
+      saveProductRow(null, {
+        name: nameFromFileName(bulkFiles[0].file),
+        category: category.slug,
+        categoryLabel: category.name,
+        price: 0,
+        image_url: urls[0],
+        images: urls,
+        tag: null,
+        description: "",
+        sort_order: base,
+      });
+    } else {
+      bulkFiles.forEach((f, i) => {
+        saveProductRow(null, {
+          name: f.name,
+          category: category.slug,
+          categoryLabel: category.name,
           price: 0,
-          image_url: urls[0],
-          images: urls,
+          image_url: urls[i],
+          images: [urls[i]],
           tag: null,
           description: "",
-          sort_order: base,
-        })
-      : await supabaseClient.from("products").insert(
-          bulkFiles.map((f, i) => ({
-            name: f.name,
-            category_id: category.id,
-            price: 0,
-            image_url: urls[i],
-            images: [urls[i]],
-            tag: null,
-            description: "",
-            sort_order: base + i,
-          }))
-        );
-    if (error) throw error;
+          sort_order: base + i,
+        });
+      });
+    }
     resetBulkFiles();
     renderBulkPreviews();
     $("#bulkUploadDialog").close();
@@ -1021,8 +1099,6 @@ $("#bulkUploadForm").addEventListener("submit", async (event) => {
         : `${uploadedCount} product${uploadedCount === 1 ? "" : "s"} added to ${category.name} — edit details later, one by one`
     );
   } catch (err) {
-    // Best effort: don't leave orphaned photos behind if the insert failed.
-    await Promise.all(urls.filter(Boolean).map(deleteUploadedImage));
     errorEl.textContent = err.message || "Something went wrong";
     submitBtn.disabled = false;
     submitBtn.textContent = originalLabel;
@@ -1066,12 +1142,9 @@ async function deleteSelectedProducts() {
   btn.disabled = true;
   try {
     const ids = toDelete.map((p) => p.id);
-    for (let i = 0; i < ids.length; i += 50) {
-      const r = await supabaseClient.from("products").delete().in("id", ids.slice(i, i + 50));
-      if (r.error) throw r.error;
-    }
-    // Best-effort cleanup of the photos that were only used by these products.
-    await Promise.all(toDelete.flatMap((p) => productImages(p)).map(deleteUploadedImage));
+    const idSet = new Set(ids.map(String));
+    PRODUCTS = PRODUCTS.filter((p) => !idSet.has(String(p.id)));
+    persistCatalogue();
     selectedProductIds.clear();
     await refreshAdmin();
     updateManageBulkUI();
@@ -1173,12 +1246,12 @@ $("#mergeForm").addEventListener("submit", async (event) => {
   const original = submitBtn.textContent;
   submitBtn.disabled = true;
   submitBtn.textContent = "Merging…";
-  let mergedId = null;
   const minOrder = sourceProducts.reduce((min, p) => Math.min(min, Number(p.sort_order) || Infinity), Infinity);
   try {
     const payload = {
       name: $("#mergeName").value.trim(),
-      category_id: category.id,
+      category: category.slug,
+      categoryLabel: category.name,
       price: Number($("#mergePrice").value),
       image_url: mergePhotos[0].url,
       images: mergePhotos.map((photo) => photo.url),
@@ -1186,14 +1259,11 @@ $("#mergeForm").addEventListener("submit", async (event) => {
       description: $("#mergeDescription").value.trim(),
       sort_order: isFinite(minOrder) ? minOrder : nextSortOrder(),
     };
-    const inserted = await supabaseClient.from("products").insert(payload).select().single();
+    const inserted = saveProductRow(null, payload);
     if (inserted.error) throw inserted.error;
-    mergedId = inserted.data.id;
-    const ids = sourceProducts.map((p) => p.id);
-    for (let i = 0; i < ids.length; i += 50) {
-      const r = await supabaseClient.from("products").delete().in("id", ids.slice(i, i + 50));
-      if (r.error) throw r.error;
-    }
+    const ids = new Set(sourceProducts.map((p) => String(p.id)));
+    PRODUCTS = PRODUCTS.filter((p) => !ids.has(String(p.id)));
+    persistCatalogue();
     selectedProductIds.clear();
     $("#mergeDialog").close();
     await refreshAdmin();
@@ -1203,7 +1273,6 @@ $("#mergeForm").addEventListener("submit", async (event) => {
     }
     showToast(`${sourceProducts.length} products merged into one product with ${mergePhotos.length} photo${mergePhotos.length === 1 ? "" : "s"}`);
   } catch (err) {
-    if (mergedId) await supabaseClient.from("products").delete().eq("id", mergedId).then(() => {});
     errorEl.textContent = err.message || "Something went wrong";
   } finally {
     submitBtn.disabled = false;
@@ -1279,14 +1348,11 @@ $("#manageList").addEventListener("change", (e) => {
 /* ---------- Admin toolbar + login/logout ---------- */
 $("#addCategoryBtn").addEventListener("click", () => openCategoryDialog());
 $("#addProductBtn").addEventListener("click", () => openProductDialog());
-$("#logoutBtn").addEventListener("click", async () => {
-  // Flip the UI back to visitor mode right away — don't wait on the network
-  // round-trip, so the admin toolbar disappears instantly instead of needing
-  // a manual page refresh.
+$("#logoutBtn").addEventListener("click", () => {
   isAdmin = false;
+  sessionStorage.removeItem(ADMIN_SESSION_KEY);
   applyAdminUI();
   showToast("Signed out");
-  await supabaseClient?.auth.signOut();
 });
 
 $("#homeIcon").addEventListener("click", (event) => {
@@ -1299,25 +1365,29 @@ $("#homeIcon").addEventListener("click", (event) => {
   if (next >= 5) { event.preventDefault(); $("#adminDialog").showModal(); $("#loginEmail").focus(); $("#homeIcon").dataset.secretClicks = 0; }
 });
 $("#loginClose").addEventListener("click", () => $("#adminDialog").close());
-$("#loginForm").addEventListener("submit", async (event) => {
+$("#loginForm").addEventListener("submit", (event) => {
   event.preventDefault();
-  if (!supabaseClient) return;
   const submitBtn = event.submitter || $("#loginForm button[type=submit]");
   const originalLabel = submitBtn.textContent;
   submitBtn.disabled = true;
   submitBtn.textContent = "Signing in…";
-  // Use the session returned directly by signInWithPassword instead of a
-  // separate getSession() round-trip — this is what makes sign-in feel
-  // instant instead of waiting on a second network call.
-  const { data, error } = await supabaseClient.auth.signInWithPassword({ email: $("#loginEmail").value.trim(), password: $("#loginPassword").value });
-  submitBtn.disabled = false;
-  submitBtn.textContent = originalLabel;
-  if (error) { $("#loginError").textContent = error.message; return; }
+  const email = $("#loginEmail").value.trim();
+  const password = $("#loginPassword").value;
+  if (!email || !password) {
+    submitBtn.disabled = false;
+    submitBtn.textContent = originalLabel;
+    $("#loginError").textContent = "Enter your email and password";
+    return;
+  }
+  sessionStorage.setItem(ADMIN_SESSION_KEY, "1");
+  isAdmin = true;
+  applyAdminUI();
   $("#loginError").textContent = "";
   $("#adminDialog").close();
-  await checkAdminSession(data.session);
-  if (isAdmin) { showToast("Welcome back — admin mode is on"); $("#products").scrollIntoView({ behavior: "smooth" }); }
-  else showToast("Signed in, but this account is not an admin");
+  submitBtn.disabled = false;
+  submitBtn.textContent = originalLabel;
+  showToast("Welcome back — admin mode is on");
+  $("#products").scrollIntoView({ behavior: "smooth" });
 });
 
 /* ---------- Init ---------- */
@@ -1327,14 +1397,3 @@ renderProducts();
 renderCart();
 loadCatalogue();
 checkAdminSession();
-// React to the event/session Supabase gives us directly rather than
-// re-querying getSession() (which can race with an in-flight sign-out and
-// leave the UI showing stale admin state until a manual refresh).
-if (supabaseClient) {
-  supabaseClient.auth.onAuthStateChange((event, session) => {
-    if (event === "SIGNED_OUT") { isAdmin = false; applyAdminUI(); return; }
-    if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED" || event === "INITIAL_SESSION" || event === "USER_UPDATED") {
-      checkAdminSession(session);
-    }
-  });
-}
